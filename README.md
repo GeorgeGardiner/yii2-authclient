@@ -1,6 +1,8 @@
 AuthClient Extension for Yii 2
 ==============================
 
+This fork will add [OpenID Connect](http://openid.net/specs/openid-connect-core-1_0.html)
+
 This extension adds [OpenID](http://openid.net/), [OAuth](http://oauth.net/) and [OAuth2](http://oauth.net/2/) consumers
 for the [Yii framework 2.0](http://www.yiiframework.com).
 
