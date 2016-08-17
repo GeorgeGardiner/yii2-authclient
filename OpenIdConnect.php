@@ -26,10 +26,18 @@ class OpenIdConnect extends OAuth2
 
     private $scopes = ['openid'];
 
+    public $data;
+
     public $allowedAlgorithms = [
         'HS256', 'HS384', 'HS512', 'ES256', 'ES384', 'ES512', 'RS256', 'RS384', 'RS512', 'PS256', 'PS384', 'PS512'
     ];
 
+    public function init()
+    {
+        if ($this->data === null) {
+            $this->data = array_merge($_GET, $_POST); // OPs may send data as POST or GET.
+        }
+    }
 
     public function buildAuthUrl(array $params = [])
     {
@@ -59,6 +67,15 @@ class OpenIdConnect extends OAuth2
 
     public function fetchAccessToken($authCode, array $params = [])
     {
+        if ($this->validateAuthState) {
+            $authState = $this->getState('authState');
+            if (!isset($_REQUEST['state']) || empty($authState) || strcmp($_REQUEST['state'], $authState) !== 0) {
+                throw new HttpException(400, 'Invalid auth state parameter.');
+            } else {
+                $this->removeState('authState');
+            }
+        }
+
         $headers = [];
 
         $defaultParams = [
@@ -77,28 +94,55 @@ class OpenIdConnect extends OAuth2
         $request = $this->createRequest()
             ->setMethod('POST')
             ->setUrl($this->discover("token_endpoint"))
-            ->setData($defaultParams)
+            ->setData(array_merge($defaultParams, $params))
             ->setHeaders($headers);
 
-        $token = $this->sendRequest($request);
+        $response = $this->sendRequest($request);
 
-        // We load the key set from an URL
         $jwkSet = JWKFactory::createFromJKU($this->discover('jwks_uri'));
-
-        // We create our loader.
         $loader = new Loader();
 
-        // The signature is verified using our key set.
-        $jws = $loader->loadAndVerifySignatureUsingKeySet(
-            $token,
+        $idJws = $loader->loadAndVerifySignatureUsingKeySet(
+            $response['id_token'],
             $jwkSet,
-            $this->allowedAlgorithms,
-            $signature_index
+            $this->allowedAlgorithms
         );
 
+        $accessJws = $loader->loadAndVerifySignatureUsingKeySet(
+            $response['access_token'],
+            $jwkSet,
+            $this->allowedAlgorithms
+        );
+
+        $idToken = $idJws->getPayload();
+        $accessToken = $accessJws->getPayload();
+
+        if (!isset($idToken['iss']) || (strcmp($idToken['iss'], $this->getProviderURL()) !== 0)) {
+            throw new HttpException(400, 'Invalid iss');
+        }
+        if (!isset($idToken['aud']) || (strcmp($idToken['aud'], $this->clientId) !== 0)) {
+            throw new HttpException(400, 'Invalid aud');
+        }
+        if (!isset($accessToken['iss']) || (strcmp($accessToken['iss'], $this->getProviderURL()) !== 0)) {
+            throw new HttpException(400, 'Invalid iss');
+        }
+        if (!isset($accessToken['aud']) || (strcmp($accessToken['aud'], $this->clientId) !== 0)) {
+            throw new HttpException(400, 'Invalid aud');
+        }
+
+        if ($this->validateNonce) {
+            $nonce = $this->getState('authNonce');
+            if (!isset($idToken['nonce']) || empty($nonce) || strcmp($idToken['nonce'], $nonce) !== 0) {
+                throw new HttpException(400, 'Invalid nonce.');
+            } else {
+                $this->removeState('authNonce');
+            }
+        }
+
+        $token = $this->createToken(['params' => $response]);
+        $this->setAccessToken($token);
         return $token;
     }
-
 
     private function generateNonce()
     {
