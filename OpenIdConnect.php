@@ -7,7 +7,8 @@ use yii\base\Exception;
 use yii\helpers\Json;
 use yii\web\HttpException;
 use yii\base\Security;
-use yii\authclient\jose\Jwt;
+use Jose\Factory\JWKFactory;
+use Jose\Loader;
 
 class OpenIdConnect extends OAuth2
 {
@@ -24,6 +25,11 @@ class OpenIdConnect extends OAuth2
     private $responseTypes = ['code'];
 
     private $scopes = ['openid'];
+
+    public $allowedAlgorithms = [
+        'HS256', 'HS384', 'HS512', 'ES256', 'ES384', 'ES512', 'RS256', 'RS384', 'RS512', 'PS256', 'PS384', 'PS512'
+    ];
+
 
     public function buildAuthUrl(array $params = [])
     {
@@ -75,14 +81,22 @@ class OpenIdConnect extends OAuth2
             ->setHeaders($headers);
 
         $token = $this->sendRequest($request);
-        $jwt = new Jwt($token);
 
+        // We load the key set from an URL
+        $jwkSet = JWKFactory::createFromJKU($this->discover('jwks_uri'));
 
-        /*
-        $token = $this->createToken(['params' => $tokenJson]);
-        $this->setAccessToken($token);
+        // We create our loader.
+        $loader = new Loader();
+
+        // The signature is verified using our key set.
+        $jws = $loader->loadAndVerifySignatureUsingKeySet(
+            $token,
+            $jwkSet,
+            $this->allowedAlgorithms,
+            $signature_index
+        );
+
         return $token;
-        */
     }
 
 
