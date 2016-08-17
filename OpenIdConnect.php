@@ -9,6 +9,9 @@ use yii\web\HttpException;
 use yii\base\Security;
 use Jose\Factory\JWKFactory;
 use Jose\Loader;
+use Jose\Checker\AudienceChecker;
+use Jose\Checker\IssuedAtChecker;
+use Jose\Factory\CheckerManagerFactory;
 
 class OpenIdConnect extends OAuth2
 {
@@ -29,7 +32,8 @@ class OpenIdConnect extends OAuth2
     public $data;
 
     public $allowedAlgorithms = [
-        'HS256', 'HS384', 'HS512', 'ES256', 'ES384', 'ES512', 'RS256', 'RS384', 'RS512', 'PS256', 'PS384', 'PS512'
+        'HS256', 'HS384', 'HS512', 'ES256', 'ES384', 'ES512',
+        'RS256', 'RS384', 'RS512', 'PS256', 'PS384', 'PS512'
     ];
 
     public function init()
@@ -101,47 +105,87 @@ class OpenIdConnect extends OAuth2
 
         $jwkSet = JWKFactory::createFromJKU($this->discover('jwks_uri'));
         $loader = new Loader();
-
-        $idJws = $loader->loadAndVerifySignatureUsingKeySet(
+        $idToken = $loader->loadAndVerifySignatureUsingKeySet(
             $response['id_token'],
             $jwkSet,
             $this->allowedAlgorithms
-        );
-
-        $accessJws = $loader->loadAndVerifySignatureUsingKeySet(
+        )->getPayload();
+        $accessToken = $loader->loadAndVerifySignatureUsingKeySet(
             $response['access_token'],
             $jwkSet,
             $this->allowedAlgorithms
-        );
+        )->getPayload();
 
-        $idToken = $idJws->getPayload();
-        $accessToken = $accessJws->getPayload();
-
-        if (!isset($idToken['iss']) || (strcmp($idToken['iss'], $this->getProviderURL()) !== 0)) {
-            throw new HttpException(400, 'Invalid iss');
-        }
-        if (!isset($idToken['aud']) || (strcmp($idToken['aud'], $this->clientId) !== 0)) {
-            throw new HttpException(400, 'Invalid aud');
-        }
-        if (!isset($accessToken['iss']) || (strcmp($accessToken['iss'], $this->getProviderURL()) !== 0)) {
-            throw new HttpException(400, 'Invalid iss');
-        }
-        if (!isset($accessToken['aud']) || (strcmp($accessToken['aud'], $this->clientId) !== 0)) {
-            throw new HttpException(400, 'Invalid aud');
-        }
+        $this->validateClaims($idToken);
+        $this->validateClaims($accessToken);
 
         if ($this->validateNonce) {
             $nonce = $this->getState('authNonce');
             if (!isset($idToken['nonce']) || empty($nonce) || strcmp($idToken['nonce'], $nonce) !== 0) {
                 throw new HttpException(400, 'Invalid nonce.');
-            } else {
+            }
+            else {
                 $this->removeState('authNonce');
             }
         }
 
-        $token = $this->createToken(['params' => $response]);
+        $token = $this->createToken(['params' => array_merge($response, $idToken, $accessToken)]);
         $this->setAccessToken($token);
         return $token;
+    }
+
+    public function refreshAccessToken(OAuthToken $token) {
+        $params = [
+            'grant_type' => 'refresh_token',
+            'client_id' => $this->clientId,
+            'client_secret' => $this->clientSecret
+        ];
+
+        $headers = [];
+
+        if (in_array('client_secret_basic', $this->discover("token_endpoint_auth_methods_supported"))) {
+            $headers = ['Authorization: Basic ' . base64_encode($this->clientId . ':' . $this->clientSecret)];
+            unset($params['client_secret']);
+        }
+
+        $params = array_merge($token->getParams(), $params);
+
+        $request = $this->createRequest()
+            ->setMethod('POST')
+            ->setUrl($this->discover("token_endpoint"))
+            ->setData($params)
+            ->setHeaders($headers);
+
+        $response = $this->sendRequest($request);
+
+        $jwkSet = JWKFactory::createFromJKU($this->discover('jwks_uri'));
+        $loader = new Loader();
+        $idToken = $loader->loadAndVerifySignatureUsingKeySet(
+            $response['id_token'],
+            $jwkSet,
+            $this->allowedAlgorithms
+        )->getPayload();
+        $accessToken = $loader->loadAndVerifySignatureUsingKeySet(
+            $response['access_token'],
+            $jwkSet,
+            $this->allowedAlgorithms
+        )->getPayload();
+
+        $this->validateClaims($idToken);
+        $this->validateClaims($accessToken);
+        $token = $this->createToken(['params' => array_merge($response, $idToken, $accessToken)]);
+        $this->setAccessToken($token);
+        return $token;
+    }
+
+    private function validateClaims($claims)
+    {
+        if (!isset($claims['iss']) || (strcmp($claims['iss'], $this->getProviderURL()) !== 0)) {
+            throw new HttpException(400, 'Invalid iss');
+        }
+        if (!isset($claims['aud']) || (strcmp($claims['aud'], $this->clientId) !== 0)) {
+            throw new HttpException(400, 'Invalid aud');
+        }
     }
 
     private function generateNonce()
@@ -184,6 +228,8 @@ class OpenIdConnect extends OAuth2
 
     public function initUserAttributes()
     {
-        return [];
+        $endpoint = $this->discover("userinfo_endpoint");
+        return $this->api($endpoint, 'GET');
     }
+
 }
